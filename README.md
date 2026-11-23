@@ -40,7 +40,7 @@ Scripts automatizados para configurar y optimizar ambientes Red Hat Enterprise L
 - Conexión a Internet (para instalación de Docker)
 
 ### Hardware
-- Disco adicional de 500GB (típicamente `/dev/sdb` en TechZone)
+- Disco adicional de 500GB (el nombre varía según la VM: `/dev/sdb`, `/dev/vdc`, `/dev/nvme1n1`...; el script lo detecta solo)
 - Mínimo 2GB RAM
 - Espacio suficiente en disco raíz para backups temporales
 
@@ -121,7 +121,7 @@ yes s | sudo ./setup_rhel_completo.sh
 
 ### Sección 0: Preparación del Disco Adicional
 
-1. **Detección del disco**: Identifica `/dev/sdb` (disco de 500GB)
+1. **Detección del disco**: Si `/mnt/second` ya está montado con ≥400GB (Techzone lo entrega así en algunas VMs, ej. `/dev/vdc1`), omite esta sección. Si no, autodetecta el disco adicional de ~500GB (cualquier nombre: `sdX`, `vdX`, `nvmeXnY`), ignorando discos con `/`, `/boot` o swap
 2. **Particionamiento**: Crea tabla GPT y partición primaria
 3. **Formateo**: Formatea con sistema de archivos ext4
 4. **Montaje**: Monta en `/mnt/second`
@@ -129,7 +129,7 @@ yes s | sudo ./setup_rhel_completo.sh
 
 ```
 Antes:                  Después:
-/dev/sdb (sin usar)  →  /dev/sdb1 → /mnt/second (500GB disponible)
+disco sin usar (sdb/vdc/nvme…)  →  partición 1 → /mnt/second (500GB disponible)
 ```
 
 ### Sección 1: Configuración de SSH y Firewall
@@ -264,7 +264,7 @@ Los scripts incluyen traps para limpieza automática en caso de:
 ### Antes de Ejecutar
 
 1. **Backup completo**: Realiza snapshot o backup del sistema
-2. **Verificar disco**: Confirma que `/dev/sdb` es el disco correcto
+2. **Verificar disco**: Confirma que el disco detectado es el correcto (`lsblk`)
    ```bash
    lsblk
    ```
@@ -297,18 +297,21 @@ Los scripts incluyen traps para limpieza automática en caso de:
 
 ## 🐛 Solución de Problemas
 
-### Error: "El disco /dev/sdb no existe"
+### Error: "No se encontró un disco adicional" / "varios discos candidatos"
 
-**Causa**: El disco adicional no está conectado o tiene otro nombre
+**Causa**: El disco adicional no está conectado, ya está en uso, o hay más de un candidato
 
 **Solución**:
 ```bash
-# Listar todos los discos
+# Listar todos los discos y puntos de montaje
 lsblk
+df -h
 
-# Si el disco es /dev/sdc en lugar de /dev/sdb, edita el script:
-# Cambia DISK_DEVICE="/dev/sdb" por DISK_DEVICE="/dev/sdc"
+# Forzar el disco manualmente (sin editar el script):
+DISK_DEVICE=/dev/vdc ./setup_rhel_completo.sh
 ```
+
+> Desde v2.2, si `/mnt/second` ya está montado con ≥400GB (ej. `/dev/vdc1`), el script omite la Sección 0 automáticamente. Si `/opt` ya está en un punto de montaje propio, omite también la Sección 2, por lo que es seguro re-ejecutarlo.
 
 ### Error: "Espacio insuficiente"
 

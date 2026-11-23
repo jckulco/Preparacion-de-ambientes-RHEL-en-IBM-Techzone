@@ -2,14 +2,14 @@
 
 # Script: setup_rhel_completo.sh
 # Descripción: Script unificado para preparar ambiente RHEL en Techzone
-#              0. Prepara y monta el disco adicional (sdb)
+#              0. Prepara y monta el disco adicional (autodetectado: sdb, vdc, nvme...)
 #              1. Configura SSH y desactiva firewall
 #              2. Mueve /opt al disco de 500GB
 #              3. Instala Docker con almacenamiento en /opt
 #              4. Instala Git para clonar y hacer push a repositorios en GitHub
 # Autor: Julio César García Hernández con apoyo de IBM Bob
 # Fecha: 2026
-# Versión: 2.1
+# Versión: 2.2
 
 set -o pipefail  # Capturar errores en pipes
 
@@ -121,13 +121,13 @@ exec 2>&1
 
 log "${GREEN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
 log "${GREEN}║  PREPARACIÓN COMPLETA DE AMBIENTE RHEL EN TECHZONE               ║${NC}"
-log "${GREEN}║  Versión 2.1                                                      ║${NC}"
+log "${GREEN}║  Versión 2.2                                                      ║${NC}"
 log "${GREEN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 echo
 log "Log de ejecución: $LOG_FILE"
 echo
 log "Este script realizará las siguientes tareas:"
-log "  0. Preparar y montar el disco adicional (sdb)"
+log "  0. Preparar y montar el disco adicional (autodetectado)"
 log "  1. Configurar SSH y desactivar firewall"
 log "  2. Mover /opt al disco de 500GB (/mnt/second)"
 log "  3. Instalar Docker con almacenamiento en /opt"
@@ -157,10 +157,67 @@ print_section "SECCIÓN 0: PREPARACIÓN DEL DISCO ADICIONAL"
 
 log "Verificando disponibilidad del disco adicional..."
 
-# Definir el disco a usar (generalmente sdb en Techzone)
-DISK_DEVICE="/dev/sdb"
-PARTITION="${DISK_DEVICE}1"
 MOUNT_POINT="/mnt/second"
+MIN_DISK_GB=400          # Tamaño mínimo esperado del disco adicional (500GB nominales)
+SKIP_DISK_PREP="false"
+
+# DETECCIÓN DEL DISCO ADICIONAL
+# El nombre del dispositivo varía según el tipo de VM en Techzone (sdb, vdb, vdc, nvme1n1...).
+# Se puede forzar manualmente con:  DISK_DEVICE=/dev/xxx ./script.sh
+#
+# Ruta A: el disco ya viene montado en /mnt/second (aprovisionado por Techzone) -> se omite la Sección 0
+# Ruta B: el disco existe pero sin montar/particionar -> se autodetecta y se prepara
+# Ruta C: no se encuentra ningún disco candidato -> error con diagnóstico
+
+if [ -z "$DISK_DEVICE" ] && mountpoint -q "$MOUNT_POINT"; then
+    EXISTING_DEV=$(findmnt -n -o SOURCE "$MOUNT_POINT")
+    EXISTING_SIZE_GB=$(df -BG "$MOUNT_POINT" | awk 'NR==2 {gsub("G","",$2); print $2}')
+    log "$MOUNT_POINT ya está montado desde $EXISTING_DEV (${EXISTING_SIZE_GB}GB)"
+    if [ "$EXISTING_SIZE_GB" -ge "$MIN_DISK_GB" ]; then
+        success "El disco adicional ya está listo en $MOUNT_POINT. Se omite la preparación (Sección 0)"
+        SKIP_DISK_PREP="true"
+    else
+        error_exit "$MOUNT_POINT ya está montado pero solo tiene ${EXISTING_SIZE_GB}GB (se esperaban >= ${MIN_DISK_GB}GB). Revisa con: lsblk; df -h"
+    fi
+fi
+
+if [ "$SKIP_DISK_PREP" != "true" ]; then
+    if [ -z "$DISK_DEVICE" ]; then
+        log "Autodetectando disco adicional (>= ${MIN_DISK_GB}GB, sin particiones del sistema)..."
+        CANDIDATES=()
+        while read -r DNAME DSIZE DTYPE; do
+            [ "$DTYPE" = "disk" ] || continue
+            [ $((DSIZE/1024/1024/1024)) -ge "$MIN_DISK_GB" ] || continue
+            # Descartar discos que contengan /, /boot, /boot/efi o swap
+            if lsblk -rno MOUNTPOINT "/dev/$DNAME" | grep -qE '^(/|/boot|/boot/efi|\[SWAP\])$'; then
+                continue
+            fi
+            CANDIDATES+=("/dev/$DNAME")
+        done < <(lsblk -b -dn -o NAME,SIZE,TYPE)
+
+        if [ ${#CANDIDATES[@]} -eq 1 ]; then
+            DISK_DEVICE="${CANDIDATES[0]}"
+            success "Disco adicional detectado: $DISK_DEVICE"
+        elif [ ${#CANDIDATES[@]} -eq 0 ]; then
+            lsblk
+            error_exit "No se encontró un disco adicional >= ${MIN_DISK_GB}GB sin uso. Revisa 'lsblk'; si el disco tiene otro nombre ejecuta: DISK_DEVICE=/dev/xxx $0"
+        else
+            lsblk
+            error_exit "Se encontraron varios discos candidatos (${CANDIDATES[*]}). Indica cuál usar: DISK_DEVICE=/dev/xxx $0"
+        fi
+    fi
+
+    # Nombre de la partición: nvme0n1 -> nvme0n1p1, sdb -> sdb1, vdc -> vdc1
+    if [[ "$DISK_DEVICE" =~ [0-9]$ ]]; then
+        PARTITION="${DISK_DEVICE}p1"
+    else
+        PARTITION="${DISK_DEVICE}1"
+    fi
+fi
+
+if [ "$SKIP_DISK_PREP" = "true" ]; then
+    :  # Sección 0 omitida: disco ya montado
+else
 
 # PASO 0.1: Verificar que el disco existe
 log "${BLUE}PASO 0.1: Verificando existencia del disco $DISK_DEVICE${NC}"
@@ -344,6 +401,8 @@ fi
 
 success "✓ Sección 0 completada: Disco preparado y montado en $MOUNT_POINT"
 
+fi  # fin de SKIP_DISK_PREP
+
 #############################################################################
 # SECCIÓN 1: CONFIGURAR SSH Y FIREWALL
 #############################################################################
@@ -440,6 +499,11 @@ success "✓ Sección 1 completada: SSH y firewall configurados"
 #############################################################################
 
 print_section "SECCIÓN 2: MIGRACIÓN DE /opt AL DISCO DE 500GB"
+
+if mountpoint -q /opt; then
+    success "/opt ya es un punto de montaje ($(findmnt -n -o SOURCE /opt)). Se omite la migración (Sección 2)"
+    df -h /opt
+else
 
 log "Verificando requisitos previos..."
 
@@ -576,6 +640,8 @@ else
 fi
 
 success "✓ Sección 2 completada: /opt migrado al disco de 500GB"
+
+fi  # fin de la guarda de /opt ya montado
 
 #############################################################################
 # SECCIÓN 3: INSTALAR DOCKER EN /opt
